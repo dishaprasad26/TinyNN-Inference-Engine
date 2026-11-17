@@ -1,0 +1,155 @@
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <math.h>
+#include "model_params.h"
+#include <time.h>
+
+int main()
+{
+    printf("\nTINY NEURAL NETWORK INFERENCE ENGINE\n");
+    printf("------------------------------------\n");
+    // Accuracy evaluation variables
+double sum_absolute_error = 0;
+double sum_squared_error = 0;
+
+int total_comparisons = 0;
+int exact_matches = 0;
+int max_difference = 0;
+
+    for (int sample = 0; sample < TEST_SAMPLES; sample++)
+    {
+        int8_t output[OUTPUT_SIZE];
+
+        printf("\n========== TEST SAMPLE %d ==========\n", sample + 1);
+
+        // Process each output neuron
+        for (int j = 0; j < OUTPUT_SIZE; j++)
+        {
+            int32_t accumulator = bias[j];
+
+            // Multiply inputs with corresponding weights
+            for (int i = 0; i < INPUT_SIZE; i++)
+            {
+                int32_t x = input_data[sample][i] - INPUT_ZP;
+                int32_t w = weights[j * INPUT_SIZE + i] - WEIGHT_ZP;
+
+                accumulator += x * w;
+            }
+
+            // Convert accumulated result back to INT8 scale
+            float multiplier =
+                (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE;
+
+            int32_t result =
+                (int32_t)roundf(accumulator * multiplier) + OUTPUT_ZP;
+
+            // Restrict output to INT8 range
+            if (result > 127)
+                result = 127;
+
+            if (result < -128)
+                result = -128;
+
+            output[j] = (int8_t)result;
+
+            printf("C Output Neuron %d: %d\n", j, output[j]);
+        }
+
+        // Compare C output with TensorFlow Lite
+        printf("\nCOMPARISON WITH TENSORFLOW LITE\n");
+        printf("--------------------------------\n");
+
+        for (int j = 0; j < OUTPUT_SIZE; j++)
+        {
+            int difference =
+                abs((int)output[j] -
+                    (int)reference_output[sample][j]);
+                    sum_absolute_error += difference;
+sum_squared_error += difference * difference;
+
+total_comparisons++;
+
+if (difference == 0)
+    exact_matches++;
+
+if (difference > max_difference)
+    max_difference = difference;
+
+            printf("Neuron %d: C = %d | TFLite = %d | Difference = %d\n",
+                   j,
+                   output[j],
+                   reference_output[sample][j],
+                   difference);
+        }
+    }
+
+    // EXECUTION TIME MEASUREMENT
+    printf("\nEXECUTION TIME MEASUREMENT\n");
+    printf("--------------------------\n");
+
+    clock_t start_time, end_time;
+
+    volatile int8_t benchmark_output[OUTPUT_SIZE];
+
+    int iterations = 100000;
+
+    start_time = clock();
+
+    for (int k = 0; k < iterations; k++)
+    {
+        int sample = k % TEST_SAMPLES;
+
+        for (int j = 0; j < OUTPUT_SIZE; j++)
+        {
+            int32_t accumulator = bias[j];
+
+            for (int i = 0; i < INPUT_SIZE; i++)
+            {
+                int32_t x = input_data[sample][i] - INPUT_ZP;
+                int32_t w = weights[j * INPUT_SIZE + i] - WEIGHT_ZP;
+
+                accumulator += x * w;
+            }
+
+            float multiplier =
+                (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE;
+
+            int32_t result =
+                (int32_t)roundf(accumulator * multiplier) + OUTPUT_ZP;
+
+            if (result > 127) result = 127;
+            if (result < -128) result = -128;
+
+            benchmark_output[j] = (int8_t)result;
+        }
+    }
+
+    end_time = clock();
+
+    double total_time =
+        (double)(end_time - start_time) / CLOCKS_PER_SEC;
+
+    printf("Total iterations: %d\n", iterations);
+    printf("Total execution time: %.6f seconds\n", total_time);
+    printf("Average inference time: %.9f seconds\n",
+           total_time / iterations);
+
+
+    printf("\nACCURACY EVALUATION\n");
+printf("-------------------\n");
+
+double mae = sum_absolute_error / total_comparisons;
+double mse = sum_squared_error / total_comparisons;
+
+printf("Total comparisons: %d\n", total_comparisons);
+printf("Exact matches: %d\n", exact_matches);
+printf("Maximum difference: %d\n", max_difference);
+printf("Mean Absolute Error (MAE): %.4f\n", mae);
+printf("Mean Squared Error (MSE): %.4f\n", mse);
+
+printf("\nAll inference tests completed!\n");
+
+    return 0;
+}

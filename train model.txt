@@ -1,0 +1,242 @@
+
+import tensorflow as tf
+import numpy as np
+
+# Set random seeds
+np.random.seed(42)
+tf.random.set_seed(42)
+
+print("Creating training dataset...")
+
+# Generate synthetic training data
+X = np.random.rand(500, 4).astype(np.float32)
+
+Y = np.column_stack([
+    X[:, 0] + X[:, 1],
+    X[:, 2] + X[:, 3],
+    X[:, 0] + X[:, 2]
+]).astype(np.float32)
+
+# Create a tiny dense neural network
+model = tf.keras.Sequential([
+    tf.keras.layers.Input(shape=(4,)),
+    tf.keras.layers.Dense(3, activation=None)
+])
+
+model.compile(
+    optimizer="adam",
+    loss="mse"
+)
+
+print("Training neural network...")
+
+model.fit(X, Y, epochs=40, verbose=0)
+
+print("Training completed!")
+
+# Convert model to INT8 TensorFlow Lite
+print("\nConverting model to INT8...")
+
+def representative_dataset():
+    for i in range(100):
+        yield [X[i:i+1]]
+
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+converter.representative_dataset = representative_dataset
+converter.target_spec.supported_ops = [
+    tf.lite.OpsSet.TFLITE_BUILTINS_INT8
+]
+converter.inference_input_type = tf.int8
+converter.inference_output_type = tf.int8
+converter._experimental_disable_per_channel = True
+
+tflite_model = converter.convert()
+
+with open("tiny_model.tflite", "wb") as f:
+    f.write(tflite_model)
+
+# Load TensorFlow Lite model
+interpreter = tf.lite.Interpreter(
+    model_content=tflite_model
+)
+
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()[0]
+output_details = interpreter.get_output_details()[0]
+
+# Extract dense layer parameters
+fc = next(
+    op for op in interpreter._get_ops_details()
+    if op["op_name"] == "FULLY_CONNECTED"
+)
+
+weights = interpreter.get_tensor(fc["inputs"][1])
+bias = interpreter.get_tensor(fc["inputs"][2])
+
+weight_details = interpreter.get_tensor_details()[
+    fc["inputs"][1]
+]
+
+weight_scale = float(
+    weight_details["quantization_parameters"]["scales"][0]
+)
+
+weight_zp = int(
+    weight_details["quantization_parameters"]["zero_points"][0]
+)
+
+input_scale, input_zp = input_details["quantization"]
+output_scale, output_zp = output_details["quantization"]
+
+# ---------------------------------------
+# TEST WITH MULTIPLE INPUT SAMPLES
+# ---------------------------------------
+
+test_inputs = np.array([
+    [0.2, 0.4, 0.6, 0.8],
+    [0.1, 0.3, 0.5, 0.7],
+    [0.9, 0.7, 0.5, 0.3],
+    [0.4, 0.6, 0.2, 0.8],
+    [0.8, 0.2, 0.4, 0.6]
+], dtype=np.float32)
+
+all_quantized_inputs = []
+all_references = []
+
+print("\nTesting multiple inputs...")
+
+for index, test_input in enumerate(test_inputs):
+
+    # Quantize input
+    quantized_input = np.clip(
+        np.round(test_input.reshape(1, 4) / input_scale) + input_zp,
+        -128,
+        127
+    ).astype(np.int8)
+
+    # Run TensorFlow Lite inference
+    interpreter.set_tensor(
+        input_details["index"],
+        quantized_input
+    )
+
+    interpreter.invoke()
+
+    reference = interpreter.get_tensor(
+        output_details["index"]
+    )
+
+    all_quantized_inputs.append(quantized_input.copy())
+    all_references.append(reference.copy())
+
+    print(f"\nTest {index + 1}")
+    print("Input:", test_input)
+    print("Quantized Input:", quantized_input.flatten())
+    print("TFLite Output:", reference.flatten())
+
+# Keep first sample for C header generation
+quantized_input = all_quantized_inputs[0]
+reference = all_references[0]
+
+# ---------------------------------------
+# GENERATE C HEADER FILE
+# ---------------------------------------
+
+TEST_SAMPLES = len(test_inputs)
+
+with open("model_params.h", "w") as f:
+
+    f.write("#ifndef MODEL_PARAMS_H\n")
+    f.write("#define MODEL_PARAMS_H\n")
+    f.write("#include <stdint.h>\n\n")
+
+    f.write("#define INPUT_SIZE 4\n")
+    f.write("#define OUTPUT_SIZE 3\n")
+    f.write(f"#define TEST_SAMPLES {TEST_SAMPLES}\n\n")
+
+    # Store all 5 quantized input samples
+    f.write(
+        "static const int8_t input_data[TEST_SAMPLES][INPUT_SIZE] = {\n"
+    )
+
+    for sample in all_quantized_inputs:
+        f.write(
+            "    {" +
+            ", ".join(map(str, sample.flatten())) +
+            "},\n"
+        )
+
+    f.write("};\n\n")
+
+    # Store neural network weights
+    f.write(
+        "static const int8_t weights[12] = {" +
+        ", ".join(map(str, weights.flatten())) +
+        "};\n\n"
+    )
+
+    # Store bias values
+    f.write(
+        "static const int32_t bias[3] = {" +
+        ", ".join(map(str, bias.flatten())) +
+        "};\n\n"
+    )
+
+    # Store quantization parameters
+    f.write(f"#define INPUT_SCALE {input_scale:.12g}f\n")
+    f.write(f"#define INPUT_ZP ({input_zp})\n")
+    f.write(f"#define WEIGHT_SCALE {weight_scale:.12g}f\n")
+    f.write(f"#define WEIGHT_ZP ({weight_zp})\n")
+    f.write(f"#define OUTPUT_SCALE {output_scale:.12g}f\n")
+    f.write(f"#define OUTPUT_ZP ({output_zp})\n\n")
+
+    # Store reference outputs for all 5 samples
+    f.write(
+        "static const int8_t reference_output[TEST_SAMPLES][OUTPUT_SIZE] = {\n"
+    )
+
+    for sample in all_references:
+        f.write(
+            "    {" +
+            ", ".join(map(str, sample.flatten())) +
+            "},\n"
+        )
+
+    f.write("};\n\n")
+
+    f.write("#endif\n")
+
+# ---------------------------------------
+# FINAL RESULTS
+# ---------------------------------------
+
+print("\nHeader file updated successfully!")
+print("Total input samples stored:", TEST_SAMPLES)
+print("Generated: model_params.h")
+
+import os
+
+print("\nMODEL SIZE ANALYSIS")
+print("-------------------")
+
+model_size = os.path.getsize("tiny_model.tflite")
+
+print("TensorFlow Lite Model Size:",
+      model_size, "bytes")
+
+print("TensorFlow Lite Model Size:",
+      round(model_size / 1024, 2), "KB")
+
+print("Input Data Memory:",
+      4 * 1, "bytes per sample")
+
+print("Weight Memory:",
+      12 * 1, "bytes")
+
+print("Bias Memory:",
+      3 * 4, "bytes")
+
+print("Output Memory:",
+      3 * 1, "bytes")

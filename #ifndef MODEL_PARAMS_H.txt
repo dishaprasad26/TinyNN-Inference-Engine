@@ -1,0 +1,36 @@
+#ifndef MODEL_PARAMS_H
+#define MODEL_PARAMS_H
+#include <stdint.h>
+
+#define INPUT_SIZE 4
+#define OUTPUT_SIZE 3
+#define TEST_SAMPLES 5
+
+static const int8_t input_data[TEST_SAMPLES][INPUT_SIZE] = {
+    {-77, -25, 26, 78},
+    {-102, -51, 1, 52},
+    {104, 52, 1, -51},
+    {-25, 26, -77, 78},
+    {78, -77, -25, 26},
+};
+
+static const int8_t weights[12] = {-54, 24, -54, 2, -33, 22, -21, -18, -13, 127, 8, -7};
+
+static const int32_t bias[3] = {16933, 16650, 13334};
+
+#define INPUT_SCALE 0.00388433388434f
+#define INPUT_ZP (-128)
+#define WEIGHT_SCALE 0.00765424687415f
+#define WEIGHT_ZP (0)
+#define OUTPUT_SCALE 0.00619016913697f
+#define OUTPUT_ZP (-96)
+
+static const int8_t reference_output[TEST_SAMPLES][OUTPUT_SIZE] = {
+    {-54, -47, 27},
+    {-44, -41, 12},
+    {-87, -53, 66},
+    {-35, -39, 51},
+    {-87, -67, -15},
+};
+
+#endif
